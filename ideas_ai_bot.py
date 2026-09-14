@@ -1,7 +1,8 @@
 """
 ИИ-бот для генерации идей на OpenRouter.
+- Работает без VPN.
 - Живой прогресс-бар во время генерации.
-- Понимает запросы на русском.
+- Защита от пустого ответа модели.
 """
 
 import os
@@ -32,8 +33,15 @@ client = OpenAI(
 bot = Bot(token=BOT_TOKEN)
 router = Router()
 
-MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+# ============ МОДЕЛЬ ============
+# Актуальные бесплатные модели OpenRouter.
+# Если одна перестанет работать — замени на следующую.
+MODEL = "google/gemma-2-9b-it:free"
+# MODEL = "mistralai/mistral-7b-instruct:free"
+# MODEL = "qwen/qwen-2.5-7b-instruct:free"
+# MODEL = "meta-llama/llama-3.2-3b-instruct:free"
 
+# ============ СИСТЕМНЫЙ ПРОМПТ ============
 SYSTEM_PROMPT = """
 Ты — креативный генератор идей. Твоя задача — выдавать свежие, неожиданные, полезные идеи.
 
@@ -63,10 +71,6 @@ def progress_bar(percent: int, length: int = 12) -> str:
 
 
 async def run_with_progress(message: Message, topic: str) -> str:
-    """
-    Запускает генерацию и параллельно обновляет сообщение с прогрессом.
-    Возвращает готовый ответ.
-    """
     progress_msg = await message.answer(
         f"🧠 **Генерирую идеи...**\n\n"
         f"{progress_bar(0)}\n"
@@ -88,7 +92,6 @@ async def run_with_progress(message: Message, topic: str) -> str:
 
     task = asyncio.create_task(worker())
 
-    # Плавно движемся до 90%, пока не придёт ответ
     percent = 0
     while not result_holder["done"]:
         await asyncio.sleep(0.7)
@@ -111,7 +114,6 @@ async def run_with_progress(message: Message, topic: str) -> str:
 
     await task
 
-    # Показываем 100% перед финальным ответом
     try:
         await progress_msg.edit_text(
             f"🧠 **Генерирую идеи...**\n\n"
@@ -123,7 +125,6 @@ async def run_with_progress(message: Message, topic: str) -> str:
     except Exception:
         pass
 
-    # Удаляем прогресс — вместо него будет финальный ответ
     try:
         await progress_msg.delete()
     except Exception:
@@ -217,14 +218,23 @@ def ask_llm(user_id: int, topic: str) -> str:
         temperature=0.9,
     )
 
-    answer = response.choices[0].message.content
-    history.append({"role": "assistant", "content": answer})
-    return answer
+    # Защита от пустого ответа
+    try:
+        content = response.choices[0].message.content
+    except (IndexError, AttributeError):
+        content = None
+
+    if not content:
+        raise RuntimeError(
+            "Модель вернула пустой ответ. Попробуй ещё раз или смени модель в коде."
+        )
+
+    history.append({"role": "assistant", "content": content})
+    return content
 
 
 async def generate_and_send(message: Message, user_id: int, topic: str, is_callback: bool = False):
     try:
-        # Сразу скрываем исходное сообщение (убираем "Началась генерация")
         if is_callback:
             try:
                 await message.edit_text("⏳ Подготовка...")
@@ -232,17 +242,14 @@ async def generate_and_send(message: Message, user_id: int, topic: str, is_callb
                 pass
 
         answer = await run_with_progress(message, topic)
-
         text = f"🧠 **Идеи по теме:** {topic}\n\n{answer}"
-
-        # Отправляем финальный ответ
         await message.answer(text, reply_markup=quick_kb(), parse_mode="Markdown")
 
     except Exception as e:
         log.exception("llm error")
         err = str(e)
         if "404" in err:
-            msg = "❌ Модель недоступна. Нужно заменить на другую бесплатную."
+            msg = "❌ Модель недоступна. Замени на другую бесплатную в коде."
         elif "429" in err or "rate" in err.lower():
             msg = "⏳ Слишком много запросов. Подожди 30 секунд."
         elif "401" in err or "auth" in err.lower():
