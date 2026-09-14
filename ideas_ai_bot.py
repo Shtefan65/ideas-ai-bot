@@ -1,8 +1,7 @@
 """
 ИИ-бот для генерации идей на OpenRouter.
+- Живой прогресс-бар во время генерации.
 - Понимает запросы на русском.
-- Генерирует идеи под конкретную тему.
-- Работает без VPN.
 """
 
 import os
@@ -25,7 +24,6 @@ ADMIN_ID = int(os.environ["OWNER_ID"])
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ideas_ai")
 
-# OpenRouter клиент
 client = OpenAI(
     api_key=OPENROUTER_KEY,
     base_url="https://openrouter.ai/api/v1",
@@ -34,10 +32,8 @@ client = OpenAI(
 bot = Bot(token=BOT_TOKEN)
 router = Router()
 
-# ============ МОДЕЛЬ ============
 MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
-# ============ СИСТЕМНЫЙ ПРОМПТ ============
 SYSTEM_PROMPT = """
 Ты — креативный генератор идей. Твоя задача — выдавать свежие, неожиданные, полезные идеи.
 
@@ -57,6 +53,85 @@ def get_history(user_id: int):
     if user_id not in conversations:
         conversations[user_id] = []
     return conversations[user_id]
+
+
+# ============ ПРОГРЕСС-БАР ============
+def progress_bar(percent: int, length: int = 12) -> str:
+    filled = int(length * percent / 100)
+    bar = "█" * filled + "░" * (length - filled)
+    return f"[{bar}] {percent}%"
+
+
+async def run_with_progress(message: Message, topic: str) -> str:
+    """
+    Запускает генерацию и параллельно обновляет сообщение с прогрессом.
+    Возвращает готовый ответ.
+    """
+    progress_msg = await message.answer(
+        f"🧠 **Генерирую идеи...**\n\n"
+        f"{progress_bar(0)}\n"
+        f"📝 {topic[:60]}{'...' if len(topic) > 60 else ''}",
+        parse_mode="Markdown"
+    )
+
+    result_holder = {"answer": None, "error": None, "done": False}
+
+    async def worker():
+        try:
+            loop = asyncio.get_event_loop()
+            answer = await loop.run_in_executor(None, ask_llm, message.from_user.id, topic)
+            result_holder["answer"] = answer
+        except Exception as e:
+            result_holder["error"] = e
+        finally:
+            result_holder["done"] = True
+
+    task = asyncio.create_task(worker())
+
+    # Плавно движемся до 90%, пока не придёт ответ
+    percent = 0
+    while not result_holder["done"]:
+        await asyncio.sleep(0.7)
+        if percent < 30:
+            percent += 7
+        elif percent < 60:
+            percent += 4
+        elif percent < 90:
+            percent += 2
+
+        try:
+            await progress_msg.edit_text(
+                f"🧠 **Генерирую идеи...**\n\n"
+                f"{progress_bar(percent)}\n"
+                f"📝 {topic[:60]}{'...' if len(topic) > 60 else ''}",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+
+    await task
+
+    # Показываем 100% перед финальным ответом
+    try:
+        await progress_msg.edit_text(
+            f"🧠 **Генерирую идеи...**\n\n"
+            f"{progress_bar(100)}\n"
+            f"✅ Готово!",
+            parse_mode="Markdown"
+        )
+        await asyncio.sleep(0.3)
+    except Exception:
+        pass
+
+    # Удаляем прогресс — вместо него будет финальный ответ
+    try:
+        await progress_msg.delete()
+    except Exception:
+        pass
+
+    if result_holder["error"]:
+        raise result_holder["error"]
+    return result_holder["answer"]
 
 
 # ============ КЛАВИАТУРА ============
@@ -96,8 +171,7 @@ async def cmd_start(message: Message):
         "**Примеры:**\n"
         "• идеи для бизнеса в маленьком городе\n"
         "• что подарить маме на день рождения\n"
-        "• идеи для свидания зимой\n"
-        "• названия для канала про кино\n\n"
+        "• идеи для свидания зимой\n\n"
         "Или выбери быструю категорию:",
         reply_markup=quick_kb(),
         parse_mode="Markdown"
@@ -124,7 +198,6 @@ async def cb_quick(callback: CallbackQuery):
         return
 
     topic = callback.data[2:]
-    await callback.message.edit_text(f"💭 Генерирую идеи по теме: **{topic}**...", parse_mode="Markdown")
     await callback.answer()
 
     await generate_and_send(callback.message, callback.from_user.id, topic, is_callback=True)
@@ -151,21 +224,25 @@ def ask_llm(user_id: int, topic: str) -> str:
 
 async def generate_and_send(message: Message, user_id: int, topic: str, is_callback: bool = False):
     try:
-        loop = asyncio.get_event_loop()
-        answer = await loop.run_in_executor(None, ask_llm, user_id, topic)
+        # Сразу скрываем исходное сообщение (убираем "Началась генерация")
+        if is_callback:
+            try:
+                await message.edit_text("⏳ Подготовка...")
+            except Exception:
+                pass
+
+        answer = await run_with_progress(message, topic)
 
         text = f"🧠 **Идеи по теме:** {topic}\n\n{answer}"
 
-        if is_callback:
-            await message.edit_text(text, reply_markup=quick_kb(), parse_mode="Markdown")
-        else:
-            await message.answer(text, reply_markup=quick_kb(), parse_mode="Markdown")
+        # Отправляем финальный ответ
+        await message.answer(text, reply_markup=quick_kb(), parse_mode="Markdown")
 
     except Exception as e:
         log.exception("llm error")
         err = str(e)
         if "404" in err:
-            msg = "❌ Модель недоступна. Замени на другую бесплатную в коде."
+            msg = "❌ Модель недоступна. Нужно заменить на другую бесплатную."
         elif "429" in err or "rate" in err.lower():
             msg = "⏳ Слишком много запросов. Подожди 30 секунд."
         elif "401" in err or "auth" in err.lower():
@@ -173,10 +250,7 @@ async def generate_and_send(message: Message, user_id: int, topic: str, is_callb
         else:
             msg = f"❌ Ошибка: {e}"
 
-        if is_callback:
-            await message.edit_text(msg)
-        else:
-            await message.answer(msg)
+        await message.answer(msg)
 
 
 # ============ ПРИЁМ ТЕКСТА ============
@@ -189,8 +263,7 @@ async def on_text(message: Message):
     if not topic or topic.startswith("/"):
         return
 
-    await bot.send_chat_action(message.chat.id, "typing")
-    await generate_and_send(message, message.from_user.id, topic)
+    await generate_and_send(message, message.from_user.id, topic, is_callback=False)
 
 
 # ============ HEALTH-СЕРВЕР ============
