@@ -208,56 +208,34 @@ async def cb_quick(callback: CallbackQuery):
 def ask_llm(user_id: int, topic: str) -> str:
     history = get_history(user_id)
     history.append({"role": "user", "content": topic})
-
     trimmed = history[-6:]
 
+    # Список моделей: основная + запасные. OpenRouter сам переключится при ошибке.
+    models_to_try = [
+        "nvidia/nemotron-3-ultra-550b-a55b:free",  # основная
+        "google/gemma-2-9b-it:free",               # запасная 1
+        "mistralai/mistral-7b-instruct:free",      # запасная 2
+    ]
+
     response = client.chat.completions.create(
-        model=MODEL,
+        model=models_to_try[0],                    # основная для валидации
         messages=[{"role": "system", "content": SYSTEM_PROMPT}] + trimmed,
         max_tokens=800,
         temperature=0.9,
+        # Магия OpenRouter: если основная упадёт, он попробует следующие [citation:3]
+        extra_body={"models": models_to_try, "route": "fallback"},
     )
 
-    # Защита от пустого ответа
     try:
         content = response.choices[0].message.content
     except (IndexError, AttributeError):
         content = None
 
     if not content:
-        raise RuntimeError(
-            "Модель вернула пустой ответ. Попробуй ещё раз или смени модель в коде."
-        )
+        raise RuntimeError("Все модели вернули пустой ответ. Попробуй позже.")
 
     history.append({"role": "assistant", "content": content})
     return content
-
-
-async def generate_and_send(message: Message, user_id: int, topic: str, is_callback: bool = False):
-    try:
-        if is_callback:
-            try:
-                await message.edit_text("⏳ Подготовка...")
-            except Exception:
-                pass
-
-        answer = await run_with_progress(message, topic)
-        text = f"🧠 **Идеи по теме:** {topic}\n\n{answer}"
-        await message.answer(text, reply_markup=quick_kb(), parse_mode="Markdown")
-
-    except Exception as e:
-        log.exception("llm error")
-        err = str(e)
-        if "404" in err:
-            msg = "❌ Модель недоступна. Замени на другую бесплатную в коде."
-        elif "429" in err or "rate" in err.lower():
-            msg = "⏳ Слишком много запросов. Подожди 30 секунд."
-        elif "401" in err or "auth" in err.lower():
-            msg = "❌ Ошибка авторизации. Проверь ключ OpenRouter."
-        else:
-            msg = f"❌ Ошибка: {e}"
-
-        await message.answer(msg)
 
 
 # ============ ПРИЁМ ТЕКСТА ============
