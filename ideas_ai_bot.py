@@ -1,6 +1,6 @@
 """
 ИИ-бот для генерации идей на OpenRouter.
-- Работает без VPN.
+- Использует роутер openrouter/free — сам выбирает доступную бесплатную модель.
 - Живой прогресс-бар во время генерации.
 - Защита от пустого ответа модели.
 """
@@ -34,7 +34,9 @@ bot = Bot(token=BOT_TOKEN)
 router = Router()
 
 # ============ МОДЕЛЬ ============
-MODEL = "google/gemma-2-9b-it:free"
+# openrouter/free — умный роутер, сам выбирает доступную бесплатную модель.
+# Если одна модель недоступна — автоматически переключается на другую.
+MODEL = "openrouter/free"
 
 # ============ СИСТЕМНЫЙ ПРОМПТ ============
 SYSTEM_PROMPT = """
@@ -220,7 +222,7 @@ def ask_llm(user_id: int, topic: str) -> str:
 
     if not content:
         raise RuntimeError(
-            "Модель вернула пустой ответ. Попробуй ещё раз или смени модель."
+            "Модель вернула пустой ответ. Попробуй ещё раз."
         )
 
     history.append({"role": "assistant", "content": content})
@@ -243,7 +245,7 @@ async def generate_and_send(message: Message, user_id: int, topic: str, is_callb
         log.exception("llm error")
         err = str(e)
         if "404" in err:
-            msg = "❌ Модель недоступна. Замени на другую бесплатную в коде."
+            msg = "❌ Модель недоступна. Роутер не смог найти рабочую. Попробуй позже."
         elif "429" in err or "rate" in err.lower():
             msg = "⏳ Слишком много запросов. Подожди 30 секунд."
         elif "401" in err or "auth" in err.lower():
