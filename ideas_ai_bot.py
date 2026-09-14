@@ -34,6 +34,9 @@ client = OpenAI(
 bot = Bot(token=BOT_TOKEN)
 router = Router()
 
+# ============ МОДЕЛЬ ============
+MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+
 # ============ СИСТЕМНЫЙ ПРОМПТ ============
 SYSTEM_PROMPT = """
 Ты — креативный генератор идей. Твоя задача — выдавать свежие, неожиданные, полезные идеи.
@@ -45,14 +48,8 @@ SYSTEM_PROMPT = """
 4. Если тема широкая — предложи разные направления.
 5. Пиши на русском, живым языком, без воды.
 6. Нумеруй идеи: 1., 2., 3., 4., 5.
-
-Пример хорошего ответа:
-1. Кофейня с зоной для работы, где каждый стол оборудован розеткой и монитором.
-2. Сервис аренды инструментов между соседями через приложение.
-...
 """
 
-# Храним историю диалога (по пользователю)
 conversations = {}
 
 
@@ -138,11 +135,10 @@ def ask_llm(user_id: int, topic: str) -> str:
     history = get_history(user_id)
     history.append({"role": "user", "content": topic})
 
-    # оставляем последние 6 сообщений
     trimmed = history[-6:]
 
     response = client.chat.completions.create(
-        model="meta-llama/llama-3.3-70b-instruct:free",
+        model=MODEL,
         messages=[{"role": "system", "content": SYSTEM_PROMPT}] + trimmed,
         max_tokens=800,
         temperature=0.9,
@@ -168,8 +164,10 @@ async def generate_and_send(message: Message, user_id: int, topic: str, is_callb
     except Exception as e:
         log.exception("llm error")
         err = str(e)
-        if "429" in err or "rate" in err.lower():
-            msg = "⏳ Слишком много запросов. Подожди 30 секунд и попробуй снова."
+        if "404" in err:
+            msg = "❌ Модель недоступна. Замени на другую бесплатную в коде."
+        elif "429" in err or "rate" in err.lower():
+            msg = "⏳ Слишком много запросов. Подожди 30 секунд."
         elif "401" in err or "auth" in err.lower():
             msg = "❌ Ошибка авторизации. Проверь ключ OpenRouter."
         else:
